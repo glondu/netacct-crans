@@ -106,6 +106,13 @@ let flush h ht chan signal =
   Hashtbl.clear ht;
   if signal = Sys.sigterm then (eprintf "dying\n%!"; Pcap.pcap_breakloop h) else ()
 
+let is_crans_ipv4 a =
+  let x = Int32.logand a 0xfffff800l in (* /21 *)
+  x = 0x8ae78800l (* 138.231.136.0 *) || x = 0x8ae79000l (* 138.231.144.0 *)
+
+let is_crans_ipv6 (a, _) =
+  let x = Int64.logand a 0xffffffffffff0000L in (* /48 *)
+  x = 0x2a010240fe3d0000L (* 2a01:240:fe3d:: *)
 
 let capture chan =
   let h = Pcap.pcap_open_live "eth0" 128 0 1000 in
