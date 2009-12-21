@@ -115,7 +115,7 @@ let is_crans_ipv6 (a, _) =
   x = 0x2a010240fe3d0000L (* 2a01:240:fe3d:: *)
 
 let capture chan =
-  let h = Pcap.pcap_open_live "eth0" 128 0 1000 in
+  let h = Pcap.pcap_open_live "ens" 128 0 1000 in
   let ht = Hashtbl.create 1024 in
   let counter = ref 0 in
   let sig_handler = Sys.Signal_handle (flush h ht chan) in
@@ -136,7 +136,7 @@ let capture chan =
           with Not_found ->
             Hashtbl.add ht key size);
          incr counter;
-         if !counter >= 100 then (flush h ht chan Sys.sigusr1; counter := 0);
+         if !counter >= 100000 then (flush h ht chan Sys.sigusr1; counter := 0);
        with
          | Error (Unknown_ethertype 0x806) (* ARP *) -> ()
          | Error e ->
