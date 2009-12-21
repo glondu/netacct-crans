@@ -17,12 +17,8 @@
 (*  <http://www.gnu.org/licenses/>.                                        *)
 (***************************************************************************)
 
-(*
-  Compile with:
-  ocamlfind ocamlopt -package pcap,bitstring,bitstring.syntax -syntax camlp4o -linkpkg pcap_test.ml
-*)
-
 open Printf
+open CalendarLib
 
 let flush_interval = 0.5
 let starting_time = Unix.gettimeofday ()
@@ -50,9 +46,20 @@ let string_of_error = function
   | Invalid_IPv6 -> "invalid IPv6 frame"
   | Unknown_ethertype i -> sprintf "unknown ethertype (0x%x)" i
 
+let format_date_for_pq x = Printer.Calendar.sprint "TIMESTAMP '%Y-%m-%d %T'" x
+let pq_now () = format_date_for_pq (Calendar.now ())
+
+let format_ipv4 x =
+  let (&&) = Int32.logand and (>>) = Int32.shift_right_logical in
+  let a = (x && 0xff000000l) >> 24 in
+  let b = (x && 0xff0000l) >> 16 in
+  let c = (x && 0xff00l) >> 8 in
+  let d = x && 0xffl in
+  sprintf "%ld.%ld.%ld.%ld" a b c d
+
 let string_of_peers = function
   | IPv4 (a, b) ->
-      sprintf "0x%08lx -> 0x%08lx" a b
+      sprintf "%s -> %s" (format_ipv4 a) (format_ipv4 b)
   | IPv6 ((a1, a2), (b1, b2)) ->
       sprintf "0x%016Lx%016Lx -> 0x%016Lx%016Lx" a1 a2 b1 b2
 
@@ -103,6 +110,7 @@ let flush h ht chan signal =
   let now = Unix.gettimeofday () in
   printf "================================================== %g \n%!" (now -. starting_time);
   output_ht chan ht;
+  flush chan;
   Hashtbl.clear ht;
   if signal = Sys.sigterm then (eprintf "dying\n%!"; Pcap.pcap_breakloop h) else ()
 
@@ -117,7 +125,7 @@ let is_crans_ipv6 (a, _) =
 let capture chan =
   let h = Pcap.pcap_open_live "ens" 128 0 1000 in
   let ht = Hashtbl.create 1024 in
-  let counter = ref 0 in
+  let last_ts = ref 0 in
   let sig_handler = Sys.Signal_handle (flush h ht chan) in
   let () = Sys.set_signal Sys.sigusr1 sig_handler in
   let () = Sys.set_signal Sys.sigterm sig_handler in
@@ -130,13 +138,18 @@ let capture chan =
               | { _ : 48; _ : 48; ethertype : 16; payload : -1 : bitstring } ->
                   parse_ether ethertype payload)
          in
-         (try
-            let size0 = Hashtbl.find ht key in
-            Hashtbl.replace ht key (size0+size)
-          with Not_found ->
-            Hashtbl.add ht key size);
-         incr counter;
-         if !counter >= 100000 then (flush h ht chan Sys.sigusr1; counter := 0);
+         let cumul =
+           try
+             let size0 = Hashtbl.find ht key in
+             let cumul = size0+size in
+             Hashtbl.replace ht key cumul; cumul
+           with Not_found ->
+             Hashtbl.add ht key size; size
+         in
+         let ts = hdr.Pcap.ts.Pcap.tv_sec in
+         (* 5 minutes or 200 MB *)
+         if ts - !last_ts >= 300 || cumul >= 200*1024*1024 then
+           (flush h ht chan Sys.sigusr1; last_ts := ts)
        with
          | Error (Unknown_ethertype 0x806) (* ARP *) -> ()
          | Error e ->
@@ -155,7 +168,53 @@ let capture chan =
 
 let rec inject chan =
   let ht = input_ht chan in
-  printf "Received hash table of size %d\n%!"  (Hashtbl.length ht);
+  printf "===> Received dump of size %d\n"  (Hashtbl.length ht);
+  let all_values = ref [] in
+  (* Top 3 *)
+  Hashtbl.iter (fun k v -> all_values := (k, v)::!all_values) ht;
+  all_values := List.sort (fun (_, v1) (_, v2) -> v2-v1) !all_values;
+  (match !all_values with
+     | a::b::c::_ -> all_values := [a; b; c]
+     | _ -> ());
+  List.iter
+    (fun ((peers, _), size) -> printf "%s: %d bytes\n" (string_of_peers peers) size)
+    !all_values;
+  (* Inject into SQL database *)
+  let pq = new Postgresql.connection ~host:"pgsql.adm.crans.org" ~user:"crans" ~dbname:"netacct-ng" () in
+  let ts = pq_now () in
+  Hashtbl.iter
+    (fun k v ->
+       try
+         (match k with
+            | (IPv4 (a, b), proto, sport, dport) ->
+                let (ip_crans, port_crans, ip_ext, port_ext, download, upload) =
+                  if is_crans_ipv4 a then (a, sport, b, dport, 0, v)
+                  else if is_crans_ipv4 b then (b, dport, a, sport, v, 0)
+                  else
+                    (eprintf "Traffic between unknown IP addresses: %s -> %s" (format_ipv4 a) (format_ipv4 b);
+                     raise Not_found)
+                in
+                let query =
+                  "INSERT INTO upload (date, ip_crans, ip_ext, proto, port_crans, port_ext, download, upload)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8);"
+                in
+                let expect = [Postgresql.Command_ok] in
+                let params = [|ts;
+                               format_ipv4 ip_crans;
+                               format_ipv4 ip_ext;
+                               string_of_int proto;
+                               string_of_int port_crans;
+                               string_of_int port_ext;
+                               string_of_int download;
+                               string_of_int upload|] in
+                ignore (pq#exec ~expect ~params query)
+            | (IPv6 (_, _), _, _, _) -> (* we ignore for now *)
+                ())
+       with Not_found -> (* a warning has been issued *)
+         ())
+    ht;
+  pq#finish;
+  printf "<=== End of dump\n%!";
   inject chan
 
 let () =
