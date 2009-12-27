@@ -21,12 +21,12 @@ open Printf
 
 (* The following code doesn't work (segfault) on komaz for an unknown reason:
 open CalendarLib
-let format_date_for_pq x = Printer.Calendar.sprint "TIMESTAMP '%Y-%m-%d %T'" x
+let format_date_for_pq x = Printer.Calendar.sprint "%Y-%m-%d %T" x
 let pq_now () = format_date_for_pq (Calendar.now ())
 *)
 
 let pq_now () =
-  let chan = Unix.open_process_in "date +\"TIMESTAMP '%Y-%m-%d %T'\"" in
+  let chan = Unix.open_process_in "date +'%Y-%m-%d %T'" in
   let r = input_line chan in
   match Unix.close_process_in chan with
     | Unix.WEXITED 0 -> r
@@ -281,38 +281,41 @@ let rec inject chan =
     !all_values;
   (* Inject into SQL database *)
   let pq = new Postgresql.connection ~host:"pgsql.adm.crans.org" ~user:"crans" ~dbname:"netacct-ng" () in
-  let ts = pq_now () in
-  Hashtbl.iter
-    (fun k v ->
-       try
-         (match k with
-            | (IPv4 (a, b), (proto, sport, dport)) ->
-                let (ip_crans, port_crans, ip_ext, port_ext, download, upload) =
-                  if is_crans_ipv4 a then (a, sport, b, dport, 0, v)
-                  else if is_crans_ipv4 b then (b, dport, a, sport, v, 0)
-                  else
-                    (debug 2 "Traffic between unknown IP addresses: %s -> %s" (format_ipv4 a) (format_ipv4 b);
-                     raise Not_found)
-                in
-                let query = sprintf
-                  (* ugly, but we want lenny compatibility! *)
-                  "INSERT INTO upload (date, ip_crans, ip_ext, proto, port_crans, port_ext, download, upload) VALUES (%s, '%s', '%s', '%d', '%d', '%d', '%d', '%d');"
-                  ts
-                  (format_ipv4 ip_crans)
-                  (format_ipv4 ip_ext)
-                  proto
-                  port_crans
-                  port_ext
-                  download
-                  upload
-                in
-                let expect = [Postgresql.Command_ok] in
-                ignore (pq#exec ~expect query)
-            | (IPv6 (_, _), (_, _, _)) -> (* we ignore for now *)
-                ())
-       with Not_found -> (* a warning has been issued *)
-         ())
-    ht;
+  let ts = sprintf "TIMESTAMP '%s'" (pq_now ()) in
+  let do_insert = ksprintf
+    (fun query ->
+       let expect = [Postgresql.Command_ok] in
+       ignore (pq#exec ~expect query))
+    (* ugly, but we want lenny compatibility! *)
+    "INSERT INTO upload (date, ip_crans, ip_ext, proto, port_crans, port_ext, download, upload) VALUES (%s, '%s', '%s', '%d', '%d', '%d', '%d', '%d');"
+    ts
+  in
+  Hashtbl.iter begin fun k v ->
+    try begin match k with
+      | (IPv4 (a, b), (proto, sport, dport)) ->
+          let (ip_crans, port_crans, ip_ext, port_ext, download, upload) =
+            if is_crans_ipv4 a then (a, sport, b, dport, 0, v)
+            else if is_crans_ipv4 b then (b, dport, a, sport, v, 0)
+            else
+              (debug 2 "Traffic between unknown IP addresses: %s -> %s\n%!" (format_ipv4 a) (format_ipv4 b);
+               raise Not_found)
+          in
+          do_insert
+            (format_ipv4 ip_crans) (format_ipv4 ip_ext)
+            proto port_crans port_ext download upload
+      | (IPv6 (a, b), (proto, sport, dport)) ->
+          let (ip_crans, port_crans, ip_ext, port_ext, download, upload) =
+            if is_crans_ipv6 a then (a, sport, b, dport, 0, v)
+            else if is_crans_ipv6 b then (b, dport, a, sport, v, 0)
+            else
+              (debug 2 "Traffic between unknown IP addresses: %s -> %s\n%!" (format_ipv6 a) (format_ipv6 b);
+               raise Not_found)
+          in
+          do_insert
+            (format_ipv6 ip_crans) (format_ipv6 ip_ext)
+            proto port_crans port_ext download upload
+    end with Not_found -> () (* a warning has been issued *)
+  end ht;
   pq#finish;
   debug 5 "<=== End of dump\n%!";
   inject chan
