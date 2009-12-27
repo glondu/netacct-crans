@@ -1,7 +1,7 @@
-all: netacct-crans
+all: netacct-crans.native
 
-%: %.ml
-	ocamlfind ocamlopt -w x -predicates opt -thread -package postgresql,pcap,bitstring,bitstring.syntax -syntax camlp4o -linkpkg -o $@ $<
+%.native: %.ml
+	ocamlfind ocamlopt -w x -dtypes -predicates opt -thread -package postgresql,pcap,bitstring,bitstring.syntax -syntax camlp4o -linkpkg -o $@ $<
 
 clean:
-	rm -f netacct-crans *.cm* *.o
+	rm -f *.cm* *.o *.native *.annot
