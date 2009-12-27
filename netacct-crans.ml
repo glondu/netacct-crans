@@ -35,6 +35,8 @@ let pq_now () =
 let starting_time = Unix.gettimeofday ()
 let formatted_starting_time = pq_now ()
 
+let newline_re = Str.regexp "[ \t]*\n[ \t]*"
+
 (** Command line handling *)
 module Clflags = struct
   let interface = ref "ens"
@@ -108,19 +110,21 @@ let level_of_int : int -> Syslog.level = function
 let dummy_debug fmt = ksprintf (fun _ -> ()) fmt
 
 let debug level fmt =
-  if level <= !Clflags.debug then begin
-    begin match Lazy.force !Clflags.syslog with
-      | Some h ->
-          begin try
-            ksprintf (Syslog.syslog h (level_of_int level)) fmt
-          with Exit -> (* level not logged with syslog *)
-            dummy_debug fmt
-          end
-      | None -> dummy_debug fmt
-    end;
-    printf "%d: " level;
-    ksprintf print_endline fmt
-  end else dummy_debug fmt
+  ksprintf begin fun msg ->
+    if level <= !Clflags.debug then begin
+      begin match Lazy.force !Clflags.syslog with
+        | Some h ->
+            begin try
+              Syslog.syslog h (level_of_int level) msg
+            with Exit -> (* level not logged with syslog *)
+              ()
+            end
+        | None -> ()
+      end;
+      printf "%d: " level;
+      print_endline msg
+    end else ()
+  end fmt
 
 let format_ipv4 x =
   let (&&) = Int32.logand and (>>) = Int32.shift_right_logical in
@@ -156,8 +160,8 @@ let format_timediff x =
 let string_of_peers = function
   | IPv4 (a, b) ->
       sprintf "%s -> %s" (format_ipv4 a) (format_ipv4 b)
-  | IPv6 ((a1, a2), (b1, b2)) ->
-      sprintf "0x%016Lx%016Lx -> 0x%016Lx%016Lx" a1 a2 b1 b2
+  | IPv6 (a, b) ->
+      sprintf "%s -> %s" (format_ipv6 a) (format_ipv6 b)
 
 let string_of_proto = function
   | ((1 | 58), typ, code) -> sprintf "ICMP (%d, %d)" typ code
@@ -277,47 +281,54 @@ let rec inject chan =
      | a::b::c::_ -> all_values := [a; b; c]
      | _ -> ());
   List.iter
-    (fun ((peers, _), size) -> debug 9 "%s: %d bytes\n" (string_of_peers peers) size)
+    (fun ((peers, _), size) -> debug 9 "%s (%d bytes)" (string_of_peers peers) size)
     !all_values;
   (* Inject into SQL database *)
-  let pq = new Postgresql.connection ~host:"pgsql.adm.crans.org" ~user:"crans" ~dbname:"netacct-ng" () in
-  let ts = sprintf "TIMESTAMP '%s'" (pq_now ()) in
-  let do_insert = ksprintf
-    (fun query ->
-       let expect = [Postgresql.Command_ok] in
-       ignore (pq#exec ~expect query))
-    (* ugly, but we want lenny compatibility! *)
-    "INSERT INTO upload (date, ip_crans, ip_ext, proto, port_crans, port_ext, download, upload) VALUES (%s, '%s', '%s', '%d', '%d', '%d', '%d', '%d');"
-    ts
-  in
-  Hashtbl.iter begin fun k v ->
-    try begin match k with
-      | (IPv4 (a, b), (proto, sport, dport)) ->
-          let (ip_crans, port_crans, ip_ext, port_ext, download, upload) =
-            if is_crans_ipv4 a then (a, sport, b, dport, 0, v)
-            else if is_crans_ipv4 b then (b, dport, a, sport, v, 0)
-            else
-              (debug 2 "Traffic between unknown IP addresses: %s -> %s\n%!" (format_ipv4 a) (format_ipv4 b);
-               raise Not_found)
-          in
-          do_insert
-            (format_ipv4 ip_crans) (format_ipv4 ip_ext)
-            proto port_crans port_ext download upload
-      | (IPv6 (a, b), (proto, sport, dport)) ->
-          let (ip_crans, port_crans, ip_ext, port_ext, download, upload) =
-            if is_crans_ipv6 a then (a, sport, b, dport, 0, v)
-            else if is_crans_ipv6 b then (b, dport, a, sport, v, 0)
-            else
-              (debug 2 "Traffic between unknown IP addresses: %s -> %s\n%!" (format_ipv6 a) (format_ipv6 b);
-               raise Not_found)
-          in
-          do_insert
-            (format_ipv6 ip_crans) (format_ipv6 ip_ext)
-            proto port_crans port_ext download upload
-    end with Not_found -> () (* a warning has been issued *)
-  end ht;
-  pq#finish;
-  debug 5 "<=== End of dump\n%!";
+  begin try
+    let pq = new Postgresql.connection ~host:"pgsql.adm.crans.org" ~user:"crans" ~dbname:"netacct-ng" () in
+    let ts = sprintf "TIMESTAMP '%s'" (pq_now ()) in
+    let do_insert = ksprintf
+      (fun query ->
+         let expect = [Postgresql.Command_ok] in
+         debug 9 "executing SQL query: %s" query;
+         ignore (pq#exec ~expect query))
+      (* ugly, but we want lenny compatibility! *)
+      "INSERT INTO upload (date, ip_crans, ip_ext, proto, port_crans, port_ext, download, upload) VALUES (%s, '%s', '%s', '%d', '%d', '%d', '%d', '%d');"
+      ts
+    in
+    begin
+      Hashtbl.iter begin fun k v ->
+        try begin match k with
+          | (IPv4 (a, b), (proto, sport, dport)) ->
+              let (ip_crans, port_crans, ip_ext, port_ext, download, upload) =
+                if is_crans_ipv4 a then (a, sport, b, dport, 0, v)
+                else if is_crans_ipv4 b then (b, dport, a, sport, v, 0)
+                else
+                  (debug 2 "Traffic between unknown IP addresses: %s -> %s\n%!" (format_ipv4 a) (format_ipv4 b);
+                   raise Not_found)
+              in
+              do_insert
+                (format_ipv4 ip_crans) (format_ipv4 ip_ext)
+                proto port_crans port_ext download upload
+          | (IPv6 (a, b), (proto, sport, dport)) ->
+              let (ip_crans, port_crans, ip_ext, port_ext, download, upload) =
+                if is_crans_ipv6 a then (a, sport, b, dport, 0, v)
+                else if is_crans_ipv6 b then (b, dport, a, sport, v, 0)
+                else
+                  (debug 2 "Traffic between unknown IP addresses: %s -> %s\n%!" (format_ipv6 a) (format_ipv6 b);
+                   raise Not_found)
+              in
+              do_insert
+                (format_ipv6 ip_crans) (format_ipv6 ip_ext)
+                proto port_crans port_ext download upload
+        end with Not_found -> () (* a warning has been issued *)
+      end ht;
+      pq#finish
+    end;
+  with Postgresql.Error e ->
+    debug 0 "E: PosgreSQL error: %s" (Str.global_replace newline_re " " (Postgresql.string_of_error e))
+  end;
+  debug 9 "<=== End of dump";
   inject chan
 
 (** Startup logic *)
@@ -360,9 +371,11 @@ let () =
         Pcap.pcap_close pcap_handle;
         close_out outc;
         Sys.set_signal Sys.sigusr1 Sys.Signal_ignore;
+        debug 1 "slave started";
         inject inc
     | slave ->
         Clflags.process := `Master (master, slave);
         close_in inc;
         Sys.set_signal Sys.sigusr1 Sys.Signal_ignore;
+        debug 1 "master started";
         capture pcap_handle outc
