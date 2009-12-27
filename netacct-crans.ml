@@ -218,6 +218,8 @@ let is_crans_ipv6 (a, _) =
   let x = Int64.logand a 0xffffffffffff0000L in (* /48 *)
   x = 0x2a010240fe3d0000L (* 2a01:240:fe3d:: *)
 
+(** Master process: captures packets, flushes a summary to the slave
+    process every now and then. *)
 let capture pcap_handle chan =
   let ht = Hashtbl.create 1024 in
   let last_ts = ref 0 in
@@ -262,7 +264,8 @@ let capture pcap_handle chan =
   end;
   Pcap.pcap_close pcap_handle
 
-
+(** Slave process: injects summaries from the master process into a
+    PostgreSQL database. *)
 let rec inject chan =
   let ht = input_ht chan in
   debug 4 "===> Received dump of size %d"  (Hashtbl.length ht);
@@ -314,6 +317,7 @@ let rec inject chan =
   debug 5 "<=== End of dump\n%!";
   inject chan
 
+(** Startup logic *)
 let () =
   let pcap_handle = Pcap.pcap_open_live !Clflags.interface 128 0 1000 in
   let inc, outc = Unix.pipe () in
