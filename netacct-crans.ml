@@ -18,9 +18,22 @@
 (***************************************************************************)
 
 open Printf
-(*open CalendarLib*)
+
+(* The following code doesn't work (segfault) on komaz for an unknown reason:
+open CalendarLib
+let format_date_for_pq x = Printer.Calendar.sprint "TIMESTAMP '%Y-%m-%d %T'" x
+let pq_now () = format_date_for_pq (Calendar.now ())
+*)
+
+let pq_now () =
+  let chan = Unix.open_process_in "date +\"TIMESTAMP '%Y-%m-%d %T'\"" in
+  let r = input_line chan in
+  match Unix.close_process_in chan with
+    | Unix.WEXITED 0 -> r
+    | _ -> failwith "unexpected return of date"
 
 let starting_time = Unix.gettimeofday ()
+let formatted_starting_time = pq_now ()
 
 (** Command line handling *)
 module Clflags = struct
@@ -28,12 +41,17 @@ module Clflags = struct
   let daemonize = ref false
   let debug = ref 3
   let pidfile = ref None
+  let force_syslog = ref false
+
+  let process = ref `None
+  let syslog = ref (lazy None)
 
   let cmdline_spec = [
     "-b", Arg.Set daemonize, " Go to background";
     "-I", Arg.Set_string interface, sprintf "<interface>  Capturing interface (default: %s)" !interface;
     "-d", Arg.Set_int debug, sprintf "<n>  Debugging level (default: %d)" !debug;
     "-p", Arg.String (fun x -> pidfile := Some x), "<pidfile>  Write master PID to file (default: none)";
+    "--force-syslog", Arg.Set force_syslog, " Force syslog even when running in foreground mode";
   ]
 
   let anonfun s =
@@ -42,7 +60,16 @@ module Clflags = struct
   let usage_msg =
     sprintf "%s [options]" Sys.argv.(0)
 
-  let () = Arg.parse cmdline_spec anonfun usage_msg
+  let string_of_process_type = function
+    | `Master (master, slave) -> sprintf "netacct-crans/%s/%d-%d/master" !interface master slave
+    | `Slave (master, slave) -> sprintf "netacct-crans/%s/%d-%d/slave" !interface master slave
+    | `None -> sprintf "netacct-crans/%s/%d" !interface (Unix.getpid ()) (* should not happen *)
+
+  let () =
+    Arg.parse cmdline_spec anonfun usage_msg;
+    if !daemonize || !force_syslog then
+      (* lazy so that both process get different handles *)
+      syslog := lazy (Some (Syslog.openlog ~facility:`LOG_DAEMON (string_of_process_type !process)))
 end
 
 (* from now on, arguments are supposed to be parsed *)
@@ -70,17 +97,30 @@ let string_of_error = function
   | Invalid_IPv6 -> "invalid IPv6 frame"
   | Unknown_ethertype i -> sprintf "unknown ethertype (0x%x)" i
 
-let pq_now () =
-  let chan = Unix.open_process_in "date +\"TIMESTAMP '%Y-%m-%d %T'\"" in
-  let r = input_line chan in
-  match Unix.close_process_in chan with
-    | Unix.WEXITED 0 -> r
-    | _ -> failwith "unexpected return of date"
+let level_of_int : int -> Syslog.level = function
+  | 0 -> `LOG_ERR
+  | 1 -> `LOG_WARNING
+  | 2 -> `LOG_NOTICE
+  | 3 -> `LOG_INFO
+  | 4 -> `LOG_DEBUG
+  | _ -> raise Exit
 
-(*
-let format_date_for_pq x = Printer.Calendar.sprint "TIMESTAMP '%Y-%m-%d %T'" x
-let pq_now () = format_date_for_pq (Calendar.now ())
-*)
+let dummy_debug fmt = ksprintf (fun _ -> ()) fmt
+
+let debug level fmt =
+  if level <= !Clflags.debug then begin
+    begin match Lazy.force !Clflags.syslog with
+      | Some h ->
+          begin try
+            ksprintf (Syslog.syslog h (level_of_int level)) fmt
+          with Exit -> (* level not logged with syslog *)
+            dummy_debug fmt
+          end
+      | None -> dummy_debug fmt
+    end;
+    printf "%d: " level;
+    ksprintf print_endline fmt
+  end else dummy_debug fmt
 
 let format_ipv4 x =
   let (&&) = Int32.logand and (>>) = Int32.shift_right_logical in
@@ -101,6 +141,17 @@ let format_ipv6 (x, y) =
   let g = (y && 0xffff0000L) >> 16 in
   let h = y && 0xffffL in
   sprintf "%Lx:%Lx:%Lx:%Lx:%Lx:%Lx:%Lx:%Lx" a b c d e f g h
+
+let format_timediff x =
+  let b = Buffer.create 128 and x = int_of_float x in
+  let days = x / 86400 and x = x mod 86400 in
+  if days > 0 then bprintf b "%dd" days;
+  let hours = x / 3600 and x = x mod 3600 in
+  if Buffer.length b > 0 || hours > 0 then bprintf b "%dh" hours;
+  let minutes = x / 60 and x = x mod 60 in
+  if Buffer.length b > 0 || minutes > 0 then bprintf b "%dm" minutes;
+  bprintf b "%ds" x;
+  Buffer.contents b
 
 let string_of_peers = function
   | IPv4 (a, b) ->
@@ -136,7 +187,7 @@ let parse_ether ethertype payload = match ethertype with
              _ : ihl*32 : bitstring;
              payload : -1 : bitstring } ->
              (* IHL should be >= 5 but seems to be = 0 in practice *)
-             if ihl <> 0 then eprintf "IHL=%d found\n%!" ihl;
+             if ihl <> 0 then debug 0 "IHL=%d found" ihl;
              ((IPv4 (src, dst),
                parse_payload true proto payload), len)
          | { } -> error Invalid_IPv4)
@@ -153,11 +204,11 @@ let parse_ether ethertype payload = match ethertype with
 
 let flush pcap_handle ht chan signal =
   let now = Unix.gettimeofday () in
-  printf "================================================== %g \n%!" (now -. starting_time);
+  debug 2 "--- %s running since %s (%s ago) ---" Sys.argv.(0) formatted_starting_time (format_timediff (now -. starting_time));
   output_ht chan ht;
   flush chan;
   Hashtbl.clear ht;
-  if signal = Sys.sigterm then (eprintf "dying\n%!"; Pcap.pcap_breakloop pcap_handle) else ()
+  if signal = Sys.sigterm then (debug 0 "SIGTERM received, dying"; Pcap.pcap_breakloop pcap_handle) else ()
 
 let is_crans_ipv4 a =
   let x = Int32.logand a 0xfffff800l in (* /21 *)
@@ -197,22 +248,24 @@ let capture pcap_handle chan =
        with
          | Error (Unknown_ethertype 0x806) (* ARP *) -> ()
          | Error e ->
-             eprintf "W: %s\n%!" (string_of_error e)
+             debug 1 "W: %s" (string_of_error e)
          | Match_failure _ ->
-             eprintf "W: invalid frame (caplen=%d)\n%!" hdr.Pcap.caplen;
+             debug 9 "W: invalid frame (caplen=%d)" hdr.Pcap.caplen;
              Bitstring.hexdump_bitstring stderr data;
-             eprintf "%!"
+             Pervasives.flush stderr
     ) ""
-  in eprintf "pcap_loop exited with code %d\n%!" r; (match r with
-        | 0 | -2 -> ()
-        | -1 -> Pcap.pcap_perror pcap_handle "netacct-ng"
-        | x -> eprintf "W: unknown return value of pcap_loop: %d\n%!" x);
+  in debug 4 "pcap_loop exited with code %d" r;
+  begin match r with
+    | 0 | -2 -> ()
+    | -1 -> Pcap.pcap_perror pcap_handle "netacct-crans"
+    | x -> debug 1 "W: unknown return value of pcap_loop: %d" x
+  end;
   Pcap.pcap_close pcap_handle
 
 
 let rec inject chan =
   let ht = input_ht chan in
-  printf "===> Received dump of size %d\n"  (Hashtbl.length ht);
+  debug 4 "===> Received dump of size %d"  (Hashtbl.length ht);
   let all_values = ref [] in
   (* Top 3 *)
   Hashtbl.iter (fun k v -> all_values := (k, v)::!all_values) ht;
@@ -221,7 +274,7 @@ let rec inject chan =
      | a::b::c::_ -> all_values := [a; b; c]
      | _ -> ());
   List.iter
-    (fun ((peers, _), size) -> printf "%s: %d bytes\n" (string_of_peers peers) size)
+    (fun ((peers, _), size) -> debug 9 "%s: %d bytes\n" (string_of_peers peers) size)
     !all_values;
   (* Inject into SQL database *)
   let pq = new Postgresql.connection ~host:"pgsql.adm.crans.org" ~user:"crans" ~dbname:"netacct-ng" () in
@@ -235,7 +288,7 @@ let rec inject chan =
                   if is_crans_ipv4 a then (a, sport, b, dport, 0, v)
                   else if is_crans_ipv4 b then (b, dport, a, sport, v, 0)
                   else
-                    (eprintf "Traffic between unknown IP addresses: %s -> %s" (format_ipv4 a) (format_ipv4 b);
+                    (debug 2 "Traffic between unknown IP addresses: %s -> %s" (format_ipv4 a) (format_ipv4 b);
                      raise Not_found)
                 in
                 let query = sprintf
@@ -258,7 +311,7 @@ let rec inject chan =
          ())
     ht;
   pq#finish;
-  printf "<=== End of dump\n%!";
+  debug 5 "<=== End of dump\n%!";
   inject chan
 
 let () =
@@ -296,11 +349,13 @@ let () =
   let master = Lazy.force write_pidfile in
   match Unix.fork () with
     | 0 ->
+        Clflags.process := `Slave (master, Unix.getpid ());
         Pcap.pcap_close pcap_handle;
         close_out outc;
         Sys.set_signal Sys.sigusr1 Sys.Signal_ignore;
         inject inc
     | slave ->
+        Clflags.process := `Master (master, slave);
         close_in inc;
         Sys.set_signal Sys.sigusr1 Sys.Signal_ignore;
         capture pcap_handle outc
