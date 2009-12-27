@@ -195,7 +195,7 @@ let rec inject chan =
     (fun k v ->
        try
          (match k with
-            | (IPv4 (a, b), proto, sport, dport) ->
+            | (IPv4 (a, b), (proto, sport, dport)) ->
                 let (ip_crans, port_crans, ip_ext, port_ext, download, upload) =
                   if is_crans_ipv4 a then (a, sport, b, dport, 0, v)
                   else if is_crans_ipv4 b then (b, dport, a, sport, v, 0)
@@ -217,7 +217,7 @@ let rec inject chan =
                                string_of_int download;
                                string_of_int upload|] in
                 ignore (pq#exec ~expect ~params query)
-            | (IPv6 (_, _), _, _, _) -> (* we ignore for now *)
+            | (IPv6 (_, _), (_, _, _)) -> (* we ignore for now *)
                 ())
        with Not_found -> (* a warning has been issued *)
          ())
