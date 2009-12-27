@@ -203,20 +203,20 @@ let rec inject chan =
                     (eprintf "Traffic between unknown IP addresses: %s -> %s" (format_ipv4 a) (format_ipv4 b);
                      raise Not_found)
                 in
-                let query =
-                  "INSERT INTO upload (date, ip_crans, ip_ext, proto, port_crans, port_ext, download, upload)
-                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8);"
+                let query = sprintf
+                  (* ugly, but we want lenny compatibility! *)
+                  "INSERT INTO upload (date, ip_crans, ip_ext, proto, port_crans, port_ext, download, upload) VALUES (%s, '%s', '%s', '%d', '%d', '%d', '%d', '%d');"
+                  ts
+                  (format_ipv4 ip_crans)
+                  (format_ipv4 ip_ext)
+                  proto
+                  port_crans
+                  port_ext
+                  download
+                  upload
                 in
                 let expect = [Postgresql.Command_ok] in
-                let params = [|ts;
-                               format_ipv4 ip_crans;
-                               format_ipv4 ip_ext;
-                               string_of_int proto;
-                               string_of_int port_crans;
-                               string_of_int port_ext;
-                               string_of_int download;
-                               string_of_int upload|] in
-                ignore (pq#exec ~expect ~params query)
+                ignore (pq#exec ~expect query)
             | (IPv6 (_, _), (_, _, _)) -> (* we ignore for now *)
                 ())
        with Not_found -> (* a warning has been issued *)
