@@ -20,8 +20,32 @@
 open Printf
 (*open CalendarLib*)
 
-let flush_interval = 0.5
 let starting_time = Unix.gettimeofday ()
+
+(** Command line handling *)
+module Clflags = struct
+  let interface = ref "ens"
+  let daemonize = ref false
+  let debug = ref 3
+  let pidfile = ref None
+
+  let cmdline_spec = [
+    "-b", Arg.Set daemonize, " Go to background";
+    "-I", Arg.Set_string interface, sprintf "<interface>  Capturing interface (default: %s)" !interface;
+    "-d", Arg.Set_int debug, sprintf "<n>  Debugging level (default: %d)" !debug;
+    "-p", Arg.String (fun x -> pidfile := Some x), "<pidfile>  Write master PID to file (default: none)";
+  ]
+
+  let anonfun s =
+    raise (Arg.Bad (sprintf "do not know what to do with %s" s))
+
+  let usage_msg =
+    sprintf "%s [options]" Sys.argv.(0)
+
+  let () = Arg.parse cmdline_spec anonfun usage_msg
+end
+
+(* from now on, arguments are supposed to be parsed *)
 
 type peers =
   | IPv4 of int32 * int32
@@ -127,13 +151,13 @@ let parse_ether ethertype payload = match ethertype with
   | x -> error (Unknown_ethertype x)
 
 
-let flush h ht chan signal =
+let flush pcap_handle ht chan signal =
   let now = Unix.gettimeofday () in
   printf "================================================== %g \n%!" (now -. starting_time);
   output_ht chan ht;
   flush chan;
   Hashtbl.clear ht;
-  if signal = Sys.sigterm then (eprintf "dying\n%!"; Pcap.pcap_breakloop h) else ()
+  if signal = Sys.sigterm then (eprintf "dying\n%!"; Pcap.pcap_breakloop pcap_handle) else ()
 
 let is_crans_ipv4 a =
   let x = Int32.logand a 0xfffff800l in (* /21 *)
@@ -143,14 +167,13 @@ let is_crans_ipv6 (a, _) =
   let x = Int64.logand a 0xffffffffffff0000L in (* /48 *)
   x = 0x2a010240fe3d0000L (* 2a01:240:fe3d:: *)
 
-let capture chan =
-  let h = Pcap.pcap_open_live "ens" 128 0 1000 in
+let capture pcap_handle chan =
   let ht = Hashtbl.create 1024 in
   let last_ts = ref 0 in
-  let sig_handler = Sys.Signal_handle (flush h ht chan) in
+  let sig_handler = Sys.Signal_handle (flush pcap_handle ht chan) in
   let () = Sys.set_signal Sys.sigusr1 sig_handler in
   let () = Sys.set_signal Sys.sigterm sig_handler in
-  let r = Pcap.pcap_loop h (-1)
+  let r = Pcap.pcap_loop pcap_handle (-1)
     (fun _ hdr data ->
        let data = data, 0, hdr.Pcap.caplen lsl 3 in (* dark magic! *)
        try
@@ -170,7 +193,7 @@ let capture chan =
          let ts = hdr.Pcap.ts.Pcap.tv_sec in
          (* 5 minutes or 200 MB *)
          if ts - !last_ts >= 300 || cumul >= 200*1024*1024 then
-           (flush h ht chan Sys.sigusr1; last_ts := ts)
+           (flush pcap_handle ht chan Sys.sigusr1; last_ts := ts)
        with
          | Error (Unknown_ethertype 0x806) (* ARP *) -> ()
          | Error e ->
@@ -182,9 +205,9 @@ let capture chan =
     ) ""
   in eprintf "pcap_loop exited with code %d\n%!" r; (match r with
         | 0 | -2 -> ()
-        | -1 -> Pcap.pcap_perror h "netacct-ng"
+        | -1 -> Pcap.pcap_perror pcap_handle "netacct-ng"
         | x -> eprintf "W: unknown return value of pcap_loop: %d\n%!" x);
-  Pcap.pcap_close h
+  Pcap.pcap_close pcap_handle
 
 
 let rec inject chan =
@@ -239,14 +262,45 @@ let rec inject chan =
   inject chan
 
 let () =
+  let pcap_handle = Pcap.pcap_open_live !Clflags.interface 128 0 1000 in
   let inc, outc = Unix.pipe () in
   let inc, outc = Unix.in_channel_of_descr inc, Unix.out_channel_of_descr outc in
-  let pid = Unix.fork () in
-  if pid <> 0 then (
-    close_in inc;
-    capture outc
-  ) else (
-    close_out outc;
-    Sys.set_signal Sys.sigusr1 Sys.Signal_ignore;
-    inject inc
-  )
+  let write_pidfile = match !Clflags.pidfile with
+    | Some x ->
+        (* we open the pid file prior to going to background, in case of error *)
+        let pidfile = open_out x in
+        lazy begin
+          let pid = Unix.getpid () in
+          fprintf pidfile "%d\n%!" pid;
+          close_out pidfile;
+          pid
+        end
+    | None ->
+        Lazy.lazy_from_fun Unix.getpid
+  in
+  if !Clflags.daemonize then begin
+    (* redirect standard channels *)
+    let devnull = Unix.openfile "/dev/null" [Unix.O_RDWR] 0o644 in
+    Unix.dup2 devnull Unix.stdout;
+    Unix.dup2 devnull Unix.stderr;
+    Unix.dup2 devnull Unix.stdin;
+    Unix.close devnull;
+    (* double-fork magic *)
+    if Unix.fork ()  > 0 then exit 0;
+    Sys.chdir "/";
+    ignore (Unix.setsid ());
+    ignore (Unix.umask 0);
+    if Unix.fork () > 0 then exit 0;
+  end;
+  (* but we write the pid after going to background! *)
+  let master = Lazy.force write_pidfile in
+  match Unix.fork () with
+    | 0 ->
+        Pcap.pcap_close pcap_handle;
+        close_out outc;
+        Sys.set_signal Sys.sigusr1 Sys.Signal_ignore;
+        inject inc
+    | slave ->
+        close_in inc;
+        Sys.set_signal Sys.sigusr1 Sys.Signal_ignore;
+        capture pcap_handle outc
