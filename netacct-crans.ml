@@ -66,6 +66,18 @@ let format_ipv4 x =
   let d = x && 0xffl in
   sprintf "%ld.%ld.%ld.%ld" a b c d
 
+let format_ipv6 (x, y) =
+  let (&&) = Int64.logand and (>>) = Int64.shift_right_logical in
+  let a = (x && 0xffff000000000000L) >> 48 in
+  let b = (x && 0xffff00000000L) >> 32 in
+  let c = (x && 0xffff0000L) >> 16 in
+  let d = x && 0xffffL in
+  let e = (y && 0xffff000000000000L) >> 48 in
+  let f = (y && 0xffff00000000L) >> 32 in
+  let g = (y && 0xffff0000L) >> 16 in
+  let h = y && 0xffffL in
+  sprintf "%Lx:%Lx:%Lx:%Lx:%Lx:%Lx:%Lx:%Lx" a b c d e f g h
+
 let string_of_peers = function
   | IPv4 (a, b) ->
       sprintf "%s -> %s" (format_ipv4 a) (format_ipv4 b)
