@@ -18,7 +18,7 @@
 (***************************************************************************)
 
 open Printf
-open CalendarLib
+(*open CalendarLib*)
 
 let flush_interval = 0.5
 let starting_time = Unix.gettimeofday ()
@@ -46,8 +46,17 @@ let string_of_error = function
   | Invalid_IPv6 -> "invalid IPv6 frame"
   | Unknown_ethertype i -> sprintf "unknown ethertype (0x%x)" i
 
+let pq_now () =
+  let chan = Unix.open_process_in "date +\"TIMESTAMP '%Y-%m-%d %T'\"" in
+  let r = input_line chan in
+  match Unix.close_process_in chan with
+    | Unix.WEXITED 0 -> r
+    | _ -> failwith "unexpected return of date"
+
+(*
 let format_date_for_pq x = Printer.Calendar.sprint "TIMESTAMP '%Y-%m-%d %T'" x
 let pq_now () = format_date_for_pq (Calendar.now ())
+*)
 
 let format_ipv4 x =
   let (&&) = Int32.logand and (>>) = Int32.shift_right_logical in
