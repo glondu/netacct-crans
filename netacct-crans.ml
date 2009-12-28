@@ -217,11 +217,14 @@ let flush pcap_handle ht chan signal =
 
 let is_crans_ipv4 a =
   let x = Int32.logand a 0xfffff800l in (* /21 *)
-  x = 0x8ae78800l (* 138.231.136.0 *) || x = 0x8ae79000l (* 138.231.144.0 *)
+  x = 0x8ae78800l (* 138.231.136.0/21 *) ||
+  x = 0x8ae79000l (* 138.231.144.0/21 *) ||
+  a = 0x8ae78706l (* 138.231.135.6, komaz-ext.ens-cachan.fr *)
 
-let is_crans_ipv6 (a, _) =
-  let x = Int64.logand a 0xffffffffffff0000L in (* /48 *)
-  x = 0x2a010240fe3d0000L (* 2a01:240:fe3d:: *)
+let is_crans_ipv6 (a1, a2) =
+  let x = Int64.logand a1 0xffffffffffff0000L in (* /48 *)
+  x = 0x2a010240fe3d0000L (* 2a01:240:fe3d::/48 *) ||
+  (a1 = 0x2a010240fe000068L && a2 = 0x2L) (* 2a01:240:fe00:68::2/64, komaz-ext *)
 
 (** Master process: captures packets, flushes a summary to the slave
     process every now and then. *)
