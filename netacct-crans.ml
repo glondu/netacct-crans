@@ -290,7 +290,7 @@ let rec inject chan =
     let do_insert = ksprintf
       (fun query ->
          let expect = [Postgresql.Command_ok] in
-         debug 9 "executing SQL query: %s" query;
+         debug 10 "executing SQL query: %s" query;
          ignore (pq#exec ~expect query))
       (* ugly, but we want lenny compatibility! *)
       "INSERT INTO upload (date, ip_crans, ip_ext, proto, port_crans, port_ext, download, upload) VALUES (%s, '%s', '%s', '%d', '%d', '%d', '%d', '%d');"
