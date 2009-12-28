@@ -305,7 +305,7 @@ let rec inject chan =
                 if is_crans_ipv4 a then (a, sport, b, dport, 0, v)
                 else if is_crans_ipv4 b then (b, dport, a, sport, v, 0)
                 else
-                  (debug 2 "Traffic between unknown IP addresses: %s -> %s\n%!" (format_ipv4 a) (format_ipv4 b);
+                  (debug 2 "Traffic between unknown IP addresses: %s -> %s" (format_ipv4 a) (format_ipv4 b);
                    raise Not_found)
               in
               do_insert
@@ -316,7 +316,7 @@ let rec inject chan =
                 if is_crans_ipv6 a then (a, sport, b, dport, 0, v)
                 else if is_crans_ipv6 b then (b, dport, a, sport, v, 0)
                 else
-                  (debug 2 "Traffic between unknown IP addresses: %s -> %s\n%!" (format_ipv6 a) (format_ipv6 b);
+                  (debug 2 "Traffic between unknown IP addresses: %s -> %s" (format_ipv6 a) (format_ipv6 b);
                    raise Not_found)
               in
               do_insert
