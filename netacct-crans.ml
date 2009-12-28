@@ -47,6 +47,7 @@ module Clflags = struct
 
   let process = ref `None
   let syslog = ref (lazy None)
+  let skip_header = ref 0
 
   let cmdline_spec = [
     "-b", Arg.Set daemonize, " Go to background";
@@ -232,11 +233,11 @@ let capture pcap_handle chan =
   let () = Sys.set_signal Sys.sigterm sig_handler in
   let r = Pcap.pcap_loop pcap_handle (-1)
     (fun _ hdr data ->
-       let data = data, 0, hdr.Pcap.caplen lsl 3 in (* dark magic! *)
+       let data = data, !Clflags.skip_header, (hdr.Pcap.caplen lsl 3) - !Clflags.skip_header in (* dark magic! *)
        try
          let (key, size) =
            (bitmatch data with
-              | { _ : 48; _ : 48; ethertype : 16; payload : -1 : bitstring } ->
+              | { ethertype : 16; payload : -1 : bitstring } ->
                   parse_ether ethertype payload)
          in
          let cumul =
@@ -334,6 +335,15 @@ let rec inject chan =
 (** Startup logic *)
 let () =
   let pcap_handle = Pcap.pcap_open_live !Clflags.interface 128 0 1000 in
+  let dl = Pcap.pcap_datalink pcap_handle in
+  let dl_name = Pcap.pcap_datalink_val_to_name dl in
+  let dl_desc = Pcap.pcap_datalink_val_to_description dl in
+  Clflags.skip_header := (* size of header to skip *)
+    begin match dl_name with
+      | "EN10MB" -> 96
+      | "LINUX_SLL" -> 112
+      | _ -> ksprintf failwith "unsupported link-type %s (%s)" dl_name dl_desc
+    end;
   let inc, outc = Unix.pipe () in
   let inc, outc = Unix.in_channel_of_descr inc, Unix.out_channel_of_descr outc in
   let write_pidfile = match !Clflags.pidfile with
@@ -377,5 +387,5 @@ let () =
         Clflags.process := `Master (master, slave);
         close_in inc;
         Sys.set_signal Sys.sigusr1 Sys.Signal_ignore;
-        debug 1 "master started";
+        debug 1 "master started -- listening on %s, link-type %s (%s)" !Clflags.interface dl_name dl_desc;
         capture pcap_handle outc
