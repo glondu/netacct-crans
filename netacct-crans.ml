@@ -43,10 +43,9 @@ module Clflags = struct
   let daemonize = ref false
   let debug = ref 3
   let pidfile = ref None
-  let force_syslog = ref false
+  let syslog = ref false
 
-  let process = ref `None
-  let syslog = ref (lazy None)
+  let process = ref "netacct-crans"
   let skip_header = ref 0
 
   let cmdline_spec = [
@@ -54,7 +53,7 @@ module Clflags = struct
     "-I", Arg.Set_string interface, sprintf "<interface>  Capturing interface (default: %s)" !interface;
     "-d", Arg.Set_int debug, sprintf "<n>  Debugging level (default: %d)" !debug;
     "-p", Arg.String (fun x -> pidfile := Some x), "<pidfile>  Write master PID to file (default: none)";
-    "--force-syslog", Arg.Set force_syslog, " Force syslog even when running in foreground mode";
+    "--force-syslog", Arg.Set syslog, " Force syslog even when running in foreground mode";
   ]
 
   let anonfun s =
@@ -63,16 +62,9 @@ module Clflags = struct
   let usage_msg =
     sprintf "%s [options]" Sys.argv.(0)
 
-  let string_of_process_type = function
-    | `Master (master, slave) -> sprintf "netacct-crans/%s/%d-%d/master" !interface master slave
-    | `Slave (master, slave) -> sprintf "netacct-crans/%s/%d-%d/slave" !interface master slave
-    | `None -> sprintf "netacct-crans/%s/%d" !interface (Unix.getpid ()) (* should not happen *)
-
   let () =
     Arg.parse cmdline_spec anonfun usage_msg;
-    if !daemonize || !force_syslog then
-      (* lazy so that both process get different handles *)
-      syslog := lazy (Some (Syslog.openlog ~facility:`LOG_DAEMON (string_of_process_type !process)))
+    if !daemonize then syslog := true
 end
 
 (* from now on, arguments are supposed to be parsed *)
@@ -113,14 +105,16 @@ let dummy_debug fmt = ksprintf (fun _ -> ()) fmt
 let debug level fmt =
   ksprintf begin fun msg ->
     if level <= !Clflags.debug then begin
-      begin match Lazy.force !Clflags.syslog with
-        | Some h ->
-            begin try
-              Syslog.syslog h (level_of_int level) msg
-            with Exit -> (* level not logged with syslog *)
-              ()
-            end
-        | None -> ()
+      if !Clflags.syslog then begin
+        (* syslog-ng seems to flush logs only once per
+           openlog/closelog, so we call them each time *)
+        try
+          let level = level_of_int level in
+          let h = Syslog.openlog ~facility:`LOG_DAEMON !Clflags.process in
+          Syslog.syslog h level msg;
+          Syslog.closelog h
+        with Exit -> (* level not logged with syslog *)
+          ()
       end;
       printf "%d: " level;
       print_endline msg
@@ -380,14 +374,14 @@ let () =
   let master = Lazy.force write_pidfile in
   match Unix.fork () with
     | 0 ->
-        Clflags.process := `Slave (master, Unix.getpid ());
+        Clflags.process := sprintf "netacct-crans/%s/%d-%d/slave" !Clflags.interface master (Unix.getpid ());
         Pcap.pcap_close pcap_handle;
         close_out outc;
         Sys.set_signal Sys.sigusr1 Sys.Signal_ignore;
         debug 1 "slave started";
         inject inc
     | slave ->
-        Clflags.process := `Master (master, slave);
+        Clflags.process := sprintf "netacct-crans/%s/%d-%d/master" !Clflags.interface master slave;
         close_in inc;
         Sys.set_signal Sys.sigusr1 Sys.Signal_ignore;
         debug 1 "master started -- listening on %s, link-type %s (%s)" !Clflags.interface dl_name dl_desc;
