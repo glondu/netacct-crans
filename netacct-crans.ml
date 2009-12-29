@@ -201,9 +201,14 @@ let parse_ether ethertype payload = match ethertype with
   | x -> error (Unknown_ethertype x)
 
 
-let flush pcap_handle ht chan signal =
+let flush =
+  let last_notice = ref (Unix.gettimeofday ()) in
+  fun pcap_handle ht chan signal ->
   let now = Unix.gettimeofday () in
-  debug 2 "--- %s running since %s (%s ago) ---" Sys.argv.(0) formatted_starting_time (format_timediff (now -. starting_time));
+  if now >= !last_notice +. 21600. (* 6 hours *) then begin
+    debug 2 "--- %s running since %s (%s ago) ---" Sys.argv.(0) formatted_starting_time (format_timediff (now -. starting_time));
+    last_notice := now
+  end;
   output_ht chan ht;
   flush chan;
   Hashtbl.clear ht;
