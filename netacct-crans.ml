@@ -238,6 +238,8 @@ let capture pcap_handle chan =
   let () = Sys.set_signal Sys.sigterm sig_handler in
   let r = Pcap.pcap_loop pcap_handle (-1)
     (fun _ hdr data ->
+       (* triggers a GC cycle to allow signals to be handled *)
+       let () = ignore [Random.int 1000] in
        let data = data, !Clflags.skip_header, (hdr.Pcap.caplen lsl 3) - !Clflags.skip_header in (* dark magic! *)
        try
          let (key, size) =
