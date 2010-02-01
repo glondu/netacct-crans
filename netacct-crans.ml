@@ -208,8 +208,12 @@ let flush =
     debug 2 "--- %s running since %s (%s ago) ---" Sys.argv.(0) formatted_starting_time (format_timediff (now -. starting_time));
     last_notice := now
   end;
-  output_ht chan ht;
-  flush chan;
+  begin try
+    output_ht chan ht;
+    flush chan
+  with
+    | e -> debug 1 "unexpected error while flushing: %s" (Printexc.to_string e)
+  end;
   Hashtbl.clear ht;
   if signal = Sys.sigterm then (debug 0 "SIGTERM received, dying"; Pcap.pcap_breakloop pcap_handle) else ()
 
@@ -388,5 +392,6 @@ let () =
         Clflags.process := sprintf "netacct-crans/%s/%d-%d/master" !Clflags.interface master slave;
         close_in inc;
         Sys.set_signal Sys.sigusr1 Sys.Signal_ignore;
+        Sys.set_signal Sys.sigpipe Sys.Signal_ignore;
         debug 1 "master started -- listening on %s, link-type %s (%s)" !Clflags.interface dl_name dl_desc;
         capture pcap_handle outc
