@@ -387,13 +387,10 @@ let () =
         Clflags.process := sprintf "netacct-crans/%s/%d-%d/slave" !Clflags.interface master (Unix.getpid ());
         Pcap.pcap_close pcap_handle;
         close_out outc;
-        Sys.set_signal Sys.sigusr1 Sys.Signal_ignore;
         debug 1 "slave started";
         inject inc
     | slave ->
         Clflags.process := sprintf "netacct-crans/%s/%d-%d/master" !Clflags.interface master slave;
         close_in inc;
-        Sys.set_signal Sys.sigusr1 Sys.Signal_ignore;
-        Sys.set_signal Sys.sigpipe Sys.Signal_ignore;
         debug 1 "master started -- listening on %s, link-type %s (%s)" !Clflags.interface dl_name dl_desc;
         capture pcap_handle outc
