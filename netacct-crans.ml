@@ -293,7 +293,7 @@ let rec inject chan =
     !all_values;
   (* Inject into SQL database *)
   begin try
-    let pq = new Postgresql.connection ~host:"pgsql.adm.crans.org" ~user:"crans" ~dbname:"netacct-ng" () in
+    let pq = new Postgresql.connection ~host:"pgsql.adm.crans.org" ~user:"crans" ~dbname:"filtrage" () in
     let ts = sprintf "TIMESTAMP '%s'" (pq_now ()) in
     let do_insert = ksprintf
       (fun query ->
