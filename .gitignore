@@ -2,3 +2,5 @@
 *.o
 *.native
 *.annot
+netacct-crans
+pcap-capture-one
