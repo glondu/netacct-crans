@@ -301,7 +301,7 @@ let rec inject chan =
          debug 10 "executing SQL query: %s" query;
          ignore (pq#exec ~expect query))
       (* ugly, but we want lenny compatibility! *)
-      "INSERT INTO upload (date, ip_crans, ip_ext, proto, port_crans, port_ext, download, upload) VALUES (%s, '%s', '%s', '%d', '%d', '%d', '%d', '%d');"
+      "INSERT INTO upload (date, ip_crans, ip_ext, id, port_crans, port_ext, download, upload) VALUES (%s, '%s', '%s', '%d', '%d', '%d', '%d', '%d');"
       ts
     in
     begin
