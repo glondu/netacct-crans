@@ -45,7 +45,9 @@ module Clflags = struct
   let syslog = ref false
 
   let process = ref "netacct-crans"
+
   let skip_header = ref 0
+  let get_ethers = ref (fun _ -> "00:00:00:00:00:00", "00:00:00:00:00:00")
 
   let cmdline_spec = [
     "-b", Arg.Set daemonize, " Go to background";
@@ -78,11 +80,13 @@ type error =
   | Invalid_IPv6
   | Unknown_ethertype of int
 
+type live_ht = (peers * (int * int * int) * (string * string), int) Hashtbl.t
+
 exception Error of error
 
 let error x = raise (Error x)
 
-let (input_ht : in_channel -> 'a), (output_ht : out_channel -> 'a -> unit) =
+let (input_ht : in_channel -> live_ht), (output_ht : out_channel -> live_ht -> unit) =
   input_value, output_value
 
 let string_of_error = function
@@ -237,16 +241,20 @@ let capture pcap_handle chan =
   let () = Sys.set_signal Sys.sigusr1 sig_handler in
   let () = Sys.set_signal Sys.sigterm sig_handler in
   let r = Pcap.pcap_loop pcap_handle (-1)
-    (fun _ hdr data ->
+    (fun _ hdr rawstring ->
        (* triggers a GC cycle to allow signals to be handled *)
        let () = ignore [Random.int 1000] in
-       let data = data, !Clflags.skip_header, (hdr.Pcap.caplen lsl 3) - !Clflags.skip_header in (* dark magic! *)
+       let len = hdr.Pcap.caplen lsl 3 in
+       (* the following two lines are dark magic! *)
+       let rawdata = rawstring, 0, len in
+       let data = rawstring, !Clflags.skip_header, len - !Clflags.skip_header in
        try
-         let (key, size) =
+         let ((a, b), size) =
            (bitmatch data with
               | { ethertype : 16; payload : -1 : bitstring } ->
                   parse_ether ethertype payload)
          in
+         let key = (a, b, !Clflags.get_ethers rawdata) in
          let cumul =
            try
              let size0 = Hashtbl.find ht key in
@@ -289,7 +297,7 @@ let rec inject chan =
      | a::b::c::_ -> all_values := [a; b; c]
      | _ -> ());
   List.iter
-    (fun ((peers, _), size) -> debug 9 "%s (%d bytes)" (string_of_peers peers) size)
+    (fun ((peers, _, _), size) -> debug 9 "%s (%d bytes)" (string_of_peers peers) size)
     !all_values;
   (* Inject into SQL database *)
   begin try
@@ -307,23 +315,27 @@ let rec inject chan =
     begin
       Hashtbl.iter begin fun k v ->
         try begin match k with
-          | (IPv4 (a, b), (proto, sport, dport)) ->
+          | (IPv4 (a, b), (proto, sport, dport), (src_ether, dst_ether)) ->
               let (ip_crans, port_crans, ip_ext, port_ext, download, upload) =
                 if is_crans_ipv4 a then (a, sport, b, dport, 0, v)
                 else if is_crans_ipv4 b then (b, dport, a, sport, v, 0)
                 else
-                  (debug 2 "Traffic between unknown IP addresses: %s -> %s" (format_ipv4 a) (format_ipv4 b);
+                  (debug 2 "Traffic between unknown IP addresses: %s (at %s) -> %s (at %s)"
+                     (format_ipv4 a) src_ether
+                     (format_ipv4 b) dst_ether;
                    raise Not_found)
               in
               do_insert
                 (format_ipv4 ip_crans) (format_ipv4 ip_ext)
                 proto port_crans port_ext download upload
-          | (IPv6 (a, b), (proto, sport, dport)) ->
+          | (IPv6 (a, b), (proto, sport, dport), (src_ether, dst_ether)) ->
               let (ip_crans, port_crans, ip_ext, port_ext, download, upload) =
                 if is_crans_ipv6 a then (a, sport, b, dport, 0, v)
                 else if is_crans_ipv6 b then (b, dport, a, sport, v, 0)
                 else
-                  (debug 2 "Traffic between unknown IP addresses: %s -> %s" (format_ipv6 a) (format_ipv6 b);
+                  (debug 2 "Traffic between unknown IP addresses: %s (at %s) -> %s (at %s)"
+                     (format_ipv6 a) src_ether
+                     (format_ipv6 b) dst_ether;
                    raise Not_found)
               in
               do_insert
@@ -351,6 +363,16 @@ let () =
       | "LINUX_SLL" -> 112
       | _ -> ksprintf failwith "unsupported link-type %s (%s)" dl_name dl_desc
     end;
+  if dl_name = "EN10MB" then begin
+    Clflags.get_ethers :=
+      let format = sprintf "%02x:%02x:%02x:%02x:%02x:%02x" in
+      fun data ->
+        (bitmatch data with
+           | { a1 : 8; a2 : 8; a3 : 8; a4 : 8; a5 : 8; a6 : 8;
+               b1 : 8; b2 : 8; b3 : 8; b4 : 8; b5 : 8; b6 : 8 } ->
+               (format b1 b2 b3 b4 b5 b6,
+                format a1 a2 a3 a4 a5 a6))
+  end;
   let inc, outc = Unix.pipe () in
   let inc, outc = Unix.in_channel_of_descr inc, Unix.out_channel_of_descr outc in
   let write_pidfile = match !Clflags.pidfile with
