@@ -265,7 +265,7 @@ let capture pcap_handle chan =
          in
          let ts = hdr.Pcap.ts.Pcap.tv_sec in
          (* 5 minutes or 200 MB *)
-         if ts - !last_ts >= 300 || cumul >= 200*1024*1024 then
+         if ts - !last_ts >= 300 || cumul >= 1024*1024*1024 then
            (flush pcap_handle ht chan Sys.sigusr1; last_ts := ts)
        with
          | Error (Unknown_ethertype 0x806) (* ARP *) -> ()
