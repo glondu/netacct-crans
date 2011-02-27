@@ -36,6 +36,8 @@ let formatted_starting_time = pq_now ()
 
 let newline_re = Str.regexp "[ \t]*\n[ \t]*"
 
+type pcap_header_type = RAW_IP | EXTRA_HEADER of int
+
 (** Command line handling *)
 module Clflags = struct
   let interface = ref "ens"
@@ -46,7 +48,7 @@ module Clflags = struct
 
   let process = ref "netacct-crans"
 
-  let skip_header = ref 0
+  let skip_header = ref RAW_IP
   let get_ethers = ref (fun _ -> "00:00:00:00:00:00", "00:00:00:00:00:00")
 
   let cmdline_spec = [
@@ -76,9 +78,9 @@ type peers =
 
 type error =
   | Invalid_Ethernet
-  | Invalid_IPv4
-  | Invalid_IPv6
+  | Invalid_IP
   | Unknown_ethertype of int
+  | Inconsistent_IP_ethertype of int
 
 type live_ht = (peers * (int * int * int) * (string * string), int) Hashtbl.t
 
@@ -91,9 +93,9 @@ let (input_ht : in_channel -> live_ht), (output_ht : out_channel -> live_ht -> u
 
 let string_of_error = function
   | Invalid_Ethernet -> "invalid ethernet frame"
-  | Invalid_IPv4 -> "invalid IPv4 frame"
-  | Invalid_IPv6 -> "invalid IPv6 frame"
+  | Invalid_IP -> "invalid IP frame"
   | Unknown_ethertype i -> sprintf "unknown ethertype (0x%x)" i
+  | Inconsistent_IP_ethertype i -> sprintf "ethertype says frame should be IPv%d, but it is not" i
 
 let level_of_int : int -> Syslog.level = function
   | 0 -> `LOG_ERR
@@ -180,28 +182,22 @@ let parse_payload is_ipv4 proto payload = match proto with
   | _ -> (proto, 0, 0)
 
 
-let parse_ether ethertype payload = match ethertype with
-  | 0x0800 (* IPv4 *) ->
-      (bitmatch payload with
-         | { 4 : 4; ihl : 4; _ : 8; len : 16; _ : 32;
-             _ : 8; proto : 8; _ : 16;
-             src : 32; dst : 32;
-             _ : ihl*32 : bitstring;
-             payload : -1 : bitstring } ->
-             (* IHL should be >= 5 but seems to be = 0 in practice *)
-             if ihl <> 0 then debug 0 "IHL=%d found" ihl;
-             ((IPv4 (src, dst),
-               parse_payload true proto payload), len)
-         | { } -> error Invalid_IPv4)
-  | 0x86dd (* IPv6 *) ->
-      (bitmatch payload with
-         | { 6 : 4; _ : 28; len : 16; proto : 8; _ : 8;
-             src1 : 64; src2 : 64; dst1 : 64; dst2 : 64;
-             payload : -1 : bitstring } ->
-             ((IPv6 ((src1, src2), (dst1, dst2)),
-               parse_payload false proto payload), len)
-         | { } -> error Invalid_IPv6)
-  | x -> error (Unknown_ethertype x)
+let parse_ip_frame payload = bitmatch payload with
+  | { 4 : 4; ihl : 4; _ : 8; len : 16; _ : 32;
+      _ : 8; proto : 8; _ : 16;
+      src : 32; dst : 32;
+      _ : ihl*32 : bitstring;
+      payload : -1 : bitstring } ->
+    (* IHL should be >= 5 but seems to be = 0 in practice *)
+    if ihl <> 0 then debug 0 "IHL=%d found" ihl;
+    ((IPv4 (src, dst),
+      parse_payload true proto payload), len)
+  | { 6 : 4; _ : 28; len : 16; proto : 8; _ : 8;
+      src1 : 64; src2 : 64; dst1 : 64; dst2 : 64;
+      payload : -1 : bitstring } ->
+    ((IPv6 ((src1, src2), (dst1, dst2)),
+      parse_payload false proto payload), len)
+  | { } -> error Invalid_IP
 
 
 let flush =
@@ -245,14 +241,30 @@ let capture pcap_handle chan =
        (* triggers a GC cycle to allow signals to be handled *)
        let () = ignore [Random.int 1000] in
        let len = hdr.Pcap.caplen lsl 3 in
+       let skip, has_ethertype = match !Clflags.skip_header with
+         | RAW_IP -> 0, false
+         | EXTRA_HEADER i -> i, true
+       in
        (* the following two lines are dark magic! *)
        let rawdata = rawstring, 0, len in
-       let data = rawstring, !Clflags.skip_header, len - !Clflags.skip_header in
+       let data = rawstring, skip, len - skip in
        try
          let ((a, b), size) =
-           (bitmatch data with
-              | { ethertype : 16; payload : -1 : bitstring } ->
-                  parse_ether ethertype payload)
+           if has_ethertype then
+             (bitmatch data with
+               | { ethertype : 16; payload : -1 : bitstring } ->
+                 let () = match ethertype with
+                   | 0x0800 -> (* the payload should be IPv4 *)
+                     (bitmatch payload with
+                         | { 4 : 4 } -> ()
+                         | { } -> error (Inconsistent_IP_ethertype 4))
+                   | 0x86dd -> (* the payload should be IPv6 *)
+                     (bitmatch payload with
+                         | { 6 : 4 } -> ()
+                         | { } -> error (Inconsistent_IP_ethertype 6))
+                   | x -> error (Unknown_ethertype x)
+                 in parse_ip_frame payload)
+           else parse_ip_frame data
          in
          let key = (a, b, !Clflags.get_ethers rawdata) in
          let cumul =
@@ -361,8 +373,9 @@ let () =
   let dl_desc = Pcap.pcap_datalink_val_to_description dl in
   Clflags.skip_header := (* size of header to skip *)
     begin match dl_name with
-      | "EN10MB" -> 96
-      | "LINUX_SLL" -> 112
+      | "EN10MB" -> EXTRA_HEADER 96
+      | "LINUX_SLL" -> EXTRA_HEADER 112
+      | "RAW" -> RAW_IP
       | _ -> ksprintf failwith "unsupported link-type %s (%s)" dl_name dl_desc
     end;
   if dl_name = "EN10MB" then begin
