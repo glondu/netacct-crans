@@ -221,7 +221,7 @@ let is_crans_ipv4 a =
   let x = Int32.logand a 0xfffff800l in (* /21 *)
   x = 0x8ae78800l (* 138.231.136.0/21 *) ||
   x = 0x8ae79000l (* 138.231.144.0/21 *) ||
-  a = 0x8ae78706l (* 138.231.135.6, komaz-ext.ens-cachan.fr *)
+  a = 0x8ae7842el (* 138.231.132.46, crans.zrt.ens-cachan.fr *)
 
 let is_crans_ipv6 (a1, a2) =
   let x = Int64.logand a1 0xffffffffffff0000L in (* /48 *)
